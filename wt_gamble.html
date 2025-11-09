@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>War Gamble</title>
+    <link rel="icon" type="image/png" href="icon.png">
+    <style>
+        body{font-family: Arial, Helvetica, sans-serif; background:#fff7f7; color:#222; margin:20px}
+        h1{font-size:20px}
+        .controls{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+        label{font-weight:600}
+        input[type=number]{width:80px;padding:6px}
+        button{padding:8px 12px;border-radius:6px;border:1px solid rgba(0,0,0,0.1);cursor:pointer}
+        #playersTable{margin-top:12px;border-collapse:collapse;width:100%}
+        #playersTable td,#playersTable th{border:1px solid #ddd;padding:8px;vertical-align:middle}
+        .wheel-wrap{width:420px;height:420px;border-radius:50%;overflow:hidden;border:6px solid #333;position:relative}
+        .wheelContents{width:100%;height:100%;position:relative}
+        .wheelCanvas{position:absolute;left:0;top:0;pointer-events:none}
+        .wheel{width:100%;height:100%;transform-origin:center center}
+        .pointer{position:absolute;right:-8px;top:50%;transform:translateY(-50%);width:0;height:0;border-top:14px solid transparent;border-bottom:14px solid transparent;border-left:20px solid red}
+        .center-dot{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:22px;height:22px;background:#fff;border-radius:50%;border:3px solid #333}
+        .layout{display:flex;gap:20px}
+        .col{flex:1}
+        .small{font-size:13px;color:#444}
+        .team-select{width:120px}
+        .log{height:360px;overflow:auto;border:1px solid #ccc;padding:8px;background:#fff}
+        .assign-btn{padding:6px 10px;margin-top:6px}
+        .muted{color:#666;font-size:18px}
+        @media(max-width:900px){ .layout{flex-direction:column} .wheel-wrap{width:320px;height:320px} }
+        #bgVideo {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: -1;
+            opacity: 0.7; /* Прозрачность */
+            pointer-events: none; /* Чтобы не мешало кликам */
+        }
+    </style>
+</head>
+<body>
+<video autoplay muted loop playsinline id="bgVideo">
+    <source src="backgroundVideo.mp4" type="video/mp4">
+</video>
+<h1>Генератор команд Gamble Thunder</h1>
+<p class="muted">Пошаговая логика: <ol><li> Выбираете чётное количество игроков;</li> <li> Вводите имена и выбираете команды вручную;</li> <li> Крутите колесо рангов каждому игроку;</li> <li> После назначения рангов крутится колесо имён внутри команды;</li> <li> Выбранный игрок крутит колесо типа техники (75% танк, 12.5% самолёт, 12.5% вертолёт). Игроки, которые не крутили — автоматически танк. Если выпал самолёт/вертолёт — игрок может отказаться и взять танк. Если ранг 3, 4 или 8 и выпал вертолёт — техника автоматически танк (в игре нет авиации таких рангов).</li></ol>    </p>
+
+<div class="controls">
+    <label>Количество игроков (чётное):</label>
+    <input id="countInput" type="number" min="2" step="2" value="6">
+    <button id="createBtn">Создать таблицу</button>
+    <button id="resetBtn">Сброс</button>
+</div>
+
+<div class="layout">
+    <div class="col">
+        <table id="playersTable"></table>
+        <div style="margin-top:8px">
+            <button id="spinAllRanks">Крутить ранги всем</button>
+            <span class="small">(или крутите по одному в таблице)</span>
+        </div>
+        <div style="margin-top:8px">
+            <button id="spinTeamA">Крутить имена Команды A</button>
+            <button id="spinTeamB">Крутить имена Команды B</button>
+        </div>
+    </div>
+
+    <div class="col">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+            <div class="wheel-wrap">
+                <div id="wheel" class="wheel"></div>
+                <div class="pointer"></div>
+                <div class="center-dot"></div>
+            </div>
+            <div style="flex:1">
+                <div class="log" id="log"></div>
+                <div style="margin-top:8px">
+                    <button id="assignDefaultTanks">Назначить танк для всех, кто не крутил</button>
+                    <button id="exportBtn">Экспорт (JSON)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // --- Утилиты ---
+    function $(sel){ return document.querySelector(sel); }
+    function $all(sel){ return Array.from(document.querySelectorAll(sel)); }
+    function logMessage(s){ const p=document.createElement('div'); p.textContent=s; $('#log').prepend(p); }
+
+    // --- Колёса ---
+    const wheelContainer = $('#wheel');
+    let isSpinning = false;
+
+    // Построить равномерное колесо (conic-gradient) с подписями
+    function buildWheelEqual(items){
+        wheelContainer.innerHTML = '';
+        const slice = 360 / items.length;
+        const palette = ['#3b82f6','#34d399','#fb7185','#fbbf24','#c084fc','#f3e3c3','#90cdf4','#fca5a5'];
+        const stops = items.map((label,i)=>`${palette[i%palette.length]} ${i*slice}deg ${(i+1)*slice}deg`).join(',');
+        const div = document.createElement('div'); div.className='wheelContents'; div.style.background=`conic-gradient(${stops})`;
+        const canvas = document.createElement('canvas'); canvas.width=420; canvas.height=420; canvas.className='wheelCanvas';
+        canvas.style.left='0'; canvas.style.top='0';
+        const ctx = canvas.getContext('2d'); ctx.translate(210,210); ctx.textAlign='center'; ctx.font='24px Arial'; ctx.fillStyle='#000';
+        for(let i=0;i<items.length;i++){ const angle = (i+0.5)*2*Math.PI/items.length - Math.PI/2; ctx.save(); ctx.rotate(angle); ctx.translate(140,0); ctx.rotate(Math.PI/2); ctx.fillText(items[i],0,0); ctx.restore(); }
+        div.appendChild(canvas); wheelContainer.appendChild(div);
+    }
+
+    // Построить кастомное колесо по процентам (например для техники)
+    function buildWheelCustom(labels, percents, colors){
+        wheelContainer.innerHTML = '';
+        const stops = percents.map((p,i)=>`${colors[i]} ${percents.slice(0,i).reduce((a,b)=>a+b,0)}% ${percents.slice(0,i+1).reduce((a,b)=>a+b,0)}%`).join(',');
+        const div = document.createElement('div'); div.className='wheelContents'; div.style.background = `conic-gradient(${stops})`;
+        const canvas = document.createElement('canvas'); canvas.width=420; canvas.height=420; canvas.className='wheelCanvas';
+        const ctx = canvas.getContext('2d'); ctx.translate(210,210); ctx.textAlign='center'; ctx.font='22px Arial'; ctx.fillStyle='#000';
+        let acc = 0;
+        for(let i=0;i<labels.length;i++){
+            const mid = acc + percents[i]/2; // percent
+            const angle = (mid/100)*2*Math.PI - Math.PI/2;
+            ctx.save(); ctx.rotate(angle); ctx.translate(140,0); ctx.rotate(Math.PI/2); ctx.fillText(labels[i],0,0); ctx.restore(); acc += percents[i];
+        }
+        div.appendChild(canvas); wheelContainer.appendChild(div);
+    }
+
+    // Универсальная функция кручения равномерного колеса
+    function spinWheelEqual(items, duration=7000){
+        return new Promise((resolve)=>{
+            if(isSpinning) return resolve(null);
+            isSpinning = true;
+            const slice = 360 / items.length;
+            const full = Math.floor(Math.random()*3)+3; // 3..5
+            const randomAngle = Math.random()*360;
+            const target = full*360 + randomAngle;
+            wheelContainer.style.transition = `transform ${duration}ms cubic-bezier(.15,.9,.1,1)`;
+            wheelContainer.style.transform = `rotate(${target}deg)`;
+            setTimeout(()=>{
+                isSpinning = false;
+                wheelContainer.style.transition = 'none';
+                const norm = target % 360; // 0..360
+                wheelContainer.style.transform = `rotate(${norm}deg)`;
+                // pointer is at 90deg (3 o'clock). Sector under pointer corresponds to original angle (360 - norm + 90)
+                // Коррекция угла ~15° (стрелка реально на 105°, нормализуем к 90°)
+                const pointerAngle = (360 - norm + 90) % 360;
+                const idx = Math.floor(pointerAngle / slice) % items.length;
+                resolve({idx,label:items[idx]});
+            }, duration+50);
+        });
+    }
+
+    // Кручение кастомного колеса по процентам
+    function spinWheelCustom(labels, percents, duration=4200){
+        return new Promise((resolve)=>{
+            if(isSpinning) return resolve(null);
+            isSpinning = true;
+            // percents sum to 100
+            const full = Math.floor(Math.random()*3)+3;
+            const randomAngle = Math.random()*360;
+            const target = full*360 + randomAngle;
+            wheelContainer.style.transition = `transform ${duration}ms cubic-bezier(.15,.9,.1,1)`;
+            wheelContainer.style.transform = `rotate(${target}deg)`;
+            setTimeout(()=>{
+                isSpinning = false;
+                wheelContainer.style.transition = 'none';
+                const norm = target % 360;
+                wheelContainer.style.transform = `rotate(${norm}deg)`;
+                // compute angle under pointer (90deg). Convert to percent of circle
+                const angleUnderPointer = (360 - norm + 90 + 0.0001) % 360; // small epsilon
+                const percent = angleUnderPointer / 360 * 100;
+                // find which percent range it falls into
+                let acc = 0; let idx = 0;
+                for(let i=0;i<percents.length;i++){ acc += percents[i]; if(percent <= acc){ idx = i; break; } }
+                resolve({idx,label:labels[idx]});
+            }, duration+50);
+        });
+    }
+
+    // --- Игроки / UI ---
+    const countInput = $('#countInput');
+    const createBtn = $('#createBtn');
+    const resetBtn = $('#resetBtn');
+    const playersTable = $('#playersTable');
+    let players = []; // {id,name,team,rank,type,spunRank,spunType}
+
+    function renderTable(){
+        playersTable.innerHTML = '';
+        const header = document.createElement('tr'); header.innerHTML = '<th>#</th><th>Имя</th><th>Команда</th><th>Ранг</th><th>Техника</th><th>Действия</th>';
+        playersTable.appendChild(header);
+        players.forEach((p,i)=>{
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+      <td>${i+1}</td>
+      <td><input data-id="${p.id}" class="nameInput" value="${escapeHtml(p.name)}"></td>
+      <td>
+        <select data-id="${p.id}" class="teamSelect team-select">
+          <option value="A" ${p.team==='A'?'selected':''}>Команда A</option>
+          <option value="B" ${p.team==='B'?'selected':''}>Команда B</option>
+        </select>
+      </td>
+      <td id="rank-${p.id}">${p.rank||'—'}</td>
+      <td id="type-${p.id}">${p.type||'—'}</td>
+      <td><button class="spinRank" data-id="${p.id}">Крутить ранг</button></td>
+    `;
+            playersTable.appendChild(tr);
+        });
+        $all('.nameInput').forEach(inp=>inp.oninput=(e)=>{ const id=e.target.dataset.id; const pl=players.find(x=>x.id===id); if(pl) pl.name=e.target.value; });
+        $all('.teamSelect').forEach(sel=>sel.onchange=(e)=>{ const id=e.target.dataset.id; const pl=players.find(x=>x.id===id); if(pl) pl.team=e.target.value; });
+        $all('.spinRank').forEach(btn=>btn.onclick=(e)=>{ const id=e.target.dataset.id; spinRankForPlayer(id); });
+    }
+    function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    createBtn.onclick = ()=>{
+        const n = parseInt(countInput.value)||0;
+        if(n<2 || n%2!==0){ alert('Введите чётное количество игроков (2,4,6,8...)'); return; }
+        players = [];
+        for(let i=0;i<n;i++) players.push({id:'p'+(i+1), name:'Игрок '+(i+1), team:(i < n/2 ? 'A' : 'B'), rank:null, type:null, spunRank:false, spunType:false});
+        renderTable(); logMessage('Таблица создана для '+n+' игроков. Выберите имена и команды.');
+    };
+    resetBtn.onclick = ()=>{ players=[]; renderTable(); wheelContainer.innerHTML=''; $('#log').innerHTML=''; };
+
+    // Ranks 3..8
+    const ranks = ['3','4','5','6','7','8'];
+    async function spinRankForPlayer(playerId){
+        const p = players.find(x=>x.id===playerId); if(!p) return;
+        buildWheelEqual(ranks);
+        const res = await spinWheelEqual(ranks);
+        if(!res) return;
+        p.rank = res.label; p.spunRank = true;
+        $(`#rank-${p.id}`).textContent = p.rank; logMessage(`${p.name} (Команда ${p.team}) — выпал ранг ${p.rank}`);
+    }
+
+    $('#spinAllRanks').onclick = async ()=>{
+        for(const p of players){ await spinRankForPlayer(p.id); await new Promise(r=>setTimeout(r,350)); }
+    };
+
+    function getTeamMembers(team){ return players.filter(p=>p.team===team); }
+
+    // Spin team names once; selected player gets type spin, others auto-tank
+    async function spinTeamNames(team){
+        const members = getTeamMembers(team);
+        if(members.length===0){ alert('Нет игроков в этой команде'); return; }
+        const names = members.map(m=>m.name||m.id);
+        buildWheelEqual(names);
+        const res = await spinWheelEqual(names);
+        if(!res) return;
+        const selectedName = res.label;
+        const player = members.find(m=>m.name===selectedName);
+        if(!player){ logMessage('Не нашёл игрока с таким именем — проверьте ввод'); return; }
+        logMessage(`В команде ${team} выпало имя: ${selectedName}`);
+        // build custom wheel for types (75/12.5/12.5)
+        const typeLabels = ['Танк','Самолёт','Вертолёт'];
+        const percents = [75,12.5,12.5];
+        const colors = ['#34d399','#3b82f6','#f97316'];
+        buildWheelCustom(typeLabels, percents, colors);
+        const tret = await spinWheelCustom(typeLabels, percents);
+        if(!tret) return;
+        const choice = tret.label;
+        // rules: if rank 3, 4 or 8 and choice is helicopter => auto tank
+        if ((player.rank === '3' || player.rank === '4'|| player.rank === '8') && choice === 'Вертолёт') {
+            player.type = 'Танк';
+            player.spunType = true;
+            $(`#type-${player.id}`).textContent = 'Танк';
+            logMessage(`${player.name}: выпал ${choice}, но для ранга ${player.rank} нет вертолётов — назначен Танк`);
+        } else if (choice === 'Танк') {
+            player.type = 'Танк';
+            player.spunType = true;
+            $(`#type-${player.id}`).textContent = 'Танк';
+            logMessage(`${player.name}: назначен Танк`);
+        } else {
+            // Самолёт 3-4 рангу разрешён, ниже — спросить
+            const accept = confirm(`${player.name}: выпал ${choice}. Принять? (OK = принять, Отмена = отказаться и взять Танк)`);
+            player.type = accept ? choice : 'Танк';
+            player.spunType = true;
+            $(`#type-${player.id}`).textContent = player.type;
+            logMessage(`${player.name}: выбран ${player.type}`);
+        }
+        // others in team -> auto tank
+        members.filter(m=>m.id!==player.id).forEach(other=>{ other.type='Танк'; other.spunType=true; $(`#type-${other.id}`).textContent='Танк'; logMessage(`${other.name} — автоматически назначен Танк (не выбран в колесе имён)`); });
+    }
+
+    $('#spinTeamA').onclick = ()=>spinTeamNames('A');
+    $('#spinTeamB').onclick = ()=>spinTeamNames('B');
+
+    // assign tank for all who didn't spin
+    $('#assignDefaultTanks').onclick = ()=>{
+        players.forEach(p=>{ if(!p.spunType){ p.type='Танк'; $(`#type-${p.id}`).textContent='Танк'; logMessage(`${p.name} — автоматически назначен Танк (не крутил)`); } });
+    };
+
+    // export
+    $('#exportBtn').onclick = ()=>{
+        const data = players.map(p=>({name:p.name,team:p.team,rank:p.rank||null,type:p.type||null}));
+        const blob = new Blob([JSON.stringify(data, null, 2)],{type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href=url; a.download='warthunder_mode.json'; a.click(); URL.revokeObjectURL(url);
+    };
+
+    // init
+    buildWheelEqual(['—']);
+
+</script>
+</body>
+</html>
